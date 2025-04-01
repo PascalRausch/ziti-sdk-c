@@ -971,6 +971,8 @@ extern int ziti_ext_auth(ziti_context ztx,
                          void *ctx);
 
 extern int ziti_ext_auth_token(ziti_context ztx, const char *token);
+// TODO: Do we need the new function?
+// extern int ziti_idtoken_auth(ziti_context ztx, const char *token);
 
 /**
  * @brief Alerts that the host running the `ziti_context` has undergone a state change.
