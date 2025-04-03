@@ -143,34 +143,17 @@ extern int ziti_ext_auth(ziti_context ztx,
     oidc_client_start(ztx->ext_auth, ext_token_cb);
     return ZITI_OK;
 }
-// TODO: Do we need the new function?
-/*
-extern int ziti_idtoken_auth(ziti_context ztx, const char *token) {
-    // validate identity state first
-    if (ztx->ext_auth == NULL) {
-        return ZITI_INVALID_STATE;
-    }
 
-    switch (ztx->auth_state) {
-        case ZitiAuthStateAuthStarted:
-        case ZitiAuthStateFullyAuthenticated:
-            return ZITI_INVALID_STATE;
-        case ZitiAuthStatePartiallyAuthenticated:
-        case ZitiAuthStateUnauthenticated:
-        case ZitiAuthImpossibleToAuthenticate:
-            break;
-    }
+extern int ziti_accesstoken_auth(ziti_context ztx, const char *token) {
+    ZITI_LOG(DEBUG, "received access token: %.*s...", 20, token);
 
-    ZITI_LOG(DEBUG, "idtoken auth received access token: %.*s...", 20, token);
-    ztx->auth_method->set_ext_jwt(ztx->auth_method, token);
-    ztx->auth_method->start(ztx->auth_method, ztx_auth_state_cb, ztx);
+    ztx->auth_method->set_ext_jwt(ztx->auth_method, token);             // sets access_token in identity
+    ziti_set_fully_authenticated(ztx, token);
 
     return ZITI_OK;
 }
-*/
-// TODO: Is this function exactly what I was trying to implement above?
+
 extern int ziti_ext_auth_token(ziti_context ztx, const char *token) {
-    ZITI_LOG(DEBUG, "NEW auth received access token: %.*s...", 20, token);
     if (ztx->auth_method) {
         ztx->auth_method->set_ext_jwt(ztx->auth_method, token);
         return 0;
