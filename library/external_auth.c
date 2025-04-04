@@ -147,10 +147,14 @@ extern int ziti_ext_auth(ziti_context ztx,
 extern int ziti_accesstoken_auth(ziti_context ztx, const char *token) {
     ZITI_LOG(DEBUG, "received access token: %.*s...", 20, token);
 
-    ztx->auth_method->set_ext_jwt(ztx->auth_method, token);             // sets access_token in identity
-    ziti_set_fully_authenticated(ztx, token);
+    if (ztx->auth_method) {
+        ztx->auth_method->set_ext_jwt(ztx->auth_method, token);             // sets access_token in identity
+        ztx->auth_method->force_refresh(ztx->auth_method);
+        ziti_set_fully_authenticated(ztx, token);
+        return ZITI_OK;
+    }
 
-    return ZITI_OK;
+    return ZITI_INVALID_STATE;
 }
 
 extern int ziti_ext_auth_token(ziti_context ztx, const char *token) {
