@@ -396,6 +396,7 @@ void ziti_set_fully_authenticated(ziti_context ztx, const char *session_token) {
         }
     }
     ziti_ctrl_get_well_known_certs(ctrl, ca_bundle_cb, ztx);
+    ziti_ctrl_current_api_session(ctrl, api_session_cb, ztx);
     ziti_ctrl_current_identity(ctrl, update_identity_data, ztx);
 
     tlsuv_private_key_t pk;
@@ -424,45 +425,8 @@ void ziti_set_fully_authenticated(ziti_context ztx, const char *session_token) {
         ziti_ctrl_create_api_certificate(ztx_get_controller(ztx), ztx->sessionCsr, on_create_cert, ztx);
     }
 
-    if (ztx->opts.cert_extension_window && ztx->id_creds.cert) {
-        struct tm exp;
-
-        ztx->id_creds.cert->get_expiration(ztx->id_creds.cert, &exp);
-        time_t now = time(0);
-        time_t exptime = mktime(&exp);
-
-        bool renew = exptime - now < ztx->opts.cert_extension_window * ONE_DAY;
-        if (renew) {
-            if (ztx->opts.events & ZitiConfigEvent) {
-                ZTX_LOG(INFO, "renewing identity certificate exp[%04d-%02d-%02d %02d:%02d]",
-                        1900 + exp.tm_year, exp.tm_mon + 1, exp.tm_mday, exp.tm_hour, exp.tm_min);
-                ziti_ctrl_current_api_session(ztx_get_controller(ztx), api_session_cb, ztx);
-            } else {
-                ZTX_LOG(WARN, "identity certificate needs to be renewed but application is not handling ZitiConfigEvent");
-            }
-
-        }
-    }
-
     ziti_services_refresh(ztx, true);
     ziti_posture_init(ztx, 20);
-}
-
-static void logout_cb(void *resp, const ziti_error *err, void *ctx) {
-    ziti_context ztx = ctx;
-
-    ziti_set_unauthenticated(ztx, NULL);
-
-    ziti_close_channels(ztx, ZITI_DISABLED);
-    ziti_ctrl_close(&ztx->ctrl);
-
-    model_map_clear(&ztx->sessions, (_free_f) free_ziti_session_ptr);
-    model_map_clear(&ztx->services, (_free_f) free_ziti_service_ptr);
-
-    if (ztx->closing) {
-        ztx->logout = true;
-        shutdown_and_free(ztx);
-    }
 }
 
 void ziti_force_api_session_refresh(ziti_context ztx) {
@@ -529,7 +493,7 @@ static void ziti_stop_internal(ziti_context ztx, void *data) {
 
         ziti_ctrl_cancel(ztx_get_controller(ztx));
         // logout
-        ziti_ctrl_logout(ztx_get_controller(ztx), logout_cb, ztx);
+        ziti_ctrl_clear_api_session(ztx_get_controller(ztx));
         update_ctrl_status(ztx, ZITI_DISABLED, ziti_errorstr(ZITI_DISABLED));
         ztx->enabled = false;
     }
@@ -539,7 +503,6 @@ static void ziti_start_internal(ziti_context ztx, void *init_req) {
     if (!ztx->enabled) {
         ZTX_LOG(INFO, "enabling Ziti Context");
         ztx->enabled = true;
-        ztx->logout = false;
 
         int rc = load_tls(&ztx->config, &ztx->tlsCtx, &ztx->id_creds);
         if (rc != 0) {
@@ -806,15 +769,12 @@ static void shutdown_and_free(ziti_context ztx) {
         return;
     }
 
-    if (!ztx->logout) {
-        ZTX_LOG(INFO, "waiting for logout");
-        return;
-    }
-
     grim_reaper(ztx);
 
-    ztx->tlsCtx->free_ctx(ztx->tlsCtx);
-    ztx->tlsCtx = NULL;
+    if (ztx->tlsCtx) {
+        ztx->tlsCtx->free_ctx(ztx->tlsCtx);
+        ztx->tlsCtx = NULL;
+    }
 
     // N.B.: libuv processes close callbacks in reverse order
     // so we put the free on the first uv_close()
@@ -1020,6 +980,7 @@ int ziti_conn_init(ziti_context ztx, ziti_connection *conn, void *data) {
     c->ziti_ctx = ztx;
     c->data = data;
     c->conn_id = ztx->conn_seq++;
+    c->rt_conn_id = c->conn_id;
 
     *conn = c;
     model_map_setl(&ctx->connections, (long) c->conn_id, c);
@@ -1603,21 +1564,15 @@ static void ca_bundle_cb(char *pkcs7, const ziti_error *err, void *ctx) {
             goto error;
         }
 
-        if (ztx->config.id.ca && strcmp(new_pem, ztx->config.id.ca) != 0) {
+        if (ztx->config.id.ca == NULL || strcmp(new_pem, ztx->config.id.ca) != 0) {
+            ztx->tlsCtx->set_ca_bundle(ztx->tlsCtx, new_pem, strlen(new_pem));
             char *old_ca = (char*)ztx->config.id.ca;
-            ztx->config.id.ca = new_pem;
+            free(old_ca);
 
-            tls_context *new_tls = NULL;
-            if (load_tls(&ztx->config, &new_tls, &ztx->id_creds) == 0) {
-                ztx_config_update(ztx);
-                free(old_ca);
-                ztx->tlsCtx = new_tls;
-                tlsuv_http_set_ssl(ztx_get_controller(ztx)->client, ztx->tlsCtx);
-                new_pem = NULL; // owned by ztx->config
-            } else {
-                ztx->config.id.ca = old_ca;
-                ZITI_LOG(ERROR, "failed to create TLS context with updated CA bundle");
-            }
+            ztx->config.id.ca = new_pem;
+            new_pem = NULL;
+
+            ztx_config_update(ztx);
         }
     } else {
         ZITI_LOG(ERROR, "failed to get CA bundle from controller: %s", err->message);
@@ -1759,7 +1714,7 @@ void ztx_prepare(uv_prepare_t *prep) {
         ziti_channel_prepare(ch);
     }
 
-    if (!ztx->enabled) {
+    if (!ztx->enabled || ztx->closing) {
         uv_timer_stop(&ztx->deadline_timer);
         uv_prepare_stop(&ztx->prepper);
     }
@@ -2166,11 +2121,45 @@ static void api_session_cb(ziti_api_session *api_sess, const ziti_error *err, vo
     char *csr = NULL;
     size_t len = 0;
     if (api_sess) {
+        model_map_iter it = model_map_iterator(&ztx->sessions);
+        while(it) {
+            ziti_session *s = model_map_it_value(it);
+            if (strcmp(s->api_session_id, api_sess->id) != 0) {
+                ZTX_LOG(DEBUG, "evicted stale session for service_id[%s]", s->service_id);
+                it = model_map_it_remove(it);
+                free_ziti_session_ptr(s);
+            } else {
+                it = model_map_it_next(it);
+            }
+        }
+
+        // check if identity cert can and need to be extended
+        if (ztx->opts.cert_extension_window == 0 || ztx->id_creds.cert == NULL) {
+            goto done;
+        }
+
+        struct tm exp;
+        ztx->id_creds.cert->get_expiration(ztx->id_creds.cert, &exp);
+        time_t now = time(0);
+        time_t exptime = mktime(&exp);
+
+        bool renew = exptime - now < ztx->opts.cert_extension_window * ONE_DAY;
+        if (!renew) {
+            goto done;
+        }
+
         if (!api_sess->is_cert_extendable) {
             ZTX_LOG(WARN, "identity certificate is not renewable");
             goto done;
         }
 
+        if ((ztx->opts.events & ZitiConfigEvent) == 0) {
+            ZTX_LOG(WARN, "identity certificate needs to be renewed but application is not handling ZitiConfigEvent");
+            goto done;
+        }
+
+        ZTX_LOG(INFO, "renewing identity certificate exp[%04d-%02d-%02d %02d:%02d]",
+                1900 + exp.tm_year, exp.tm_mon + 1, exp.tm_mday, exp.tm_hour, exp.tm_min);
         if (ztx->tlsCtx->generate_csr_to_pem(ztx->id_creds.key, &csr, &len, "O", "OpenZiti",
                                          "DC", ztx->config.controller_url,
                                          "CN", api_sess->identity_id,

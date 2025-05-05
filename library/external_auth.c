@@ -151,8 +151,6 @@ extern int ziti_accesstoken_auth(ziti_context ztx, const char *token) {
         ztx->auth_method->set_ext_jwt(ztx->auth_method, token);             // sets access_token in identity
         ztx->auth_method->start(ztx->auth_method, ztx_auth_state_cb, ztx);
 
-        //ztx->auth_method->force_refresh(ztx->auth_method);
-        //ziti_set_fully_authenticated(ztx, token);
         return ZITI_OK;
     }
 

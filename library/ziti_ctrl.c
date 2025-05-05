@@ -83,8 +83,8 @@ XX(COULD_NOT_VALIDATE, ZITI_NOT_AUTHORIZED)
     return ZITI_WTF;
 }
 
-#define CTRL_LOG(lvl, fmt, ...) ZITI_LOG(lvl, "ctrl[%s:%s] " fmt, \
-ctrl->client->host, ctrl->client->port, ##__VA_ARGS__)
+#define CTRL_LOG(lvl, fmt, ...) ZITI_LOG(lvl, "ctrl[%s] " fmt, \
+ctrl->url ? ctrl->url : "<unset>", ##__VA_ARGS__)
 
 #define MAKE_RESP(ctrl, cb, parser, ctx) prepare_resp(ctrl, (ctrl_resp_cb_t)(cb), (body_parse_fn)(parser), ctx)
 
@@ -293,7 +293,7 @@ static void internal_ctrl_list_cb(ziti_controller_detail_array arr, const ziti_e
         api_address *addr = NULL;
         MODEL_LIST_FOREACH(addr, d->apis.edge) {
             CTRL_LOG(VERBOSE, "%s/%s", addr->version, addr->url);
-            if (strcmp(addr->version, "v1") == 0) {
+            if (addr->version && strcmp(addr->version, "v1") == 0) {
                 break;
             }
             addr = NULL;
@@ -309,6 +309,7 @@ static void internal_ctrl_list_cb(ziti_controller_detail_array arr, const ziti_e
                 change = change || (old_detail->is_online != d->is_online);
             }
         } else {
+            CTRL_LOG(DEBUG, "ctrl[%s] has no edge/v1 endpoint", d->name);
             free_ziti_controller_detail_ptr(d);
         }
     }
@@ -392,7 +393,9 @@ static void ctrl_login_cb(ziti_api_session *s, ziti_error *e, struct ctrl_resp *
     if (s) {
         CTRL_LOG(DEBUG, "authenticated successfully session[%s]", s->id);
         ctrl->has_token = true;
-        tlsuv_http_header(ctrl->client, "zt-session", s->token);
+        if (!ctrl->is_ha) {
+            tlsuv_http_header(ctrl->client, "zt-session", s->token);
+        }
     }
     ctrl_default_cb(s, e, resp);
 }
@@ -612,7 +615,6 @@ int ziti_ctrl_init(uv_loop_t *loop, ziti_controller *ctrl, model_list *urls, tls
     ctrl->page_size = DEFAULT_PAGE_SIZE;
     ctrl->loop = loop;
     memset(&ctrl->version, 0, sizeof(ctrl->version));
-    ctrl->client = calloc(1, sizeof(tlsuv_http_t));
 
     const char *ep;
     MODEL_LIST_FOREACH(ep, *urls) {
@@ -623,10 +625,16 @@ int ziti_ctrl_init(uv_loop_t *loop, ziti_controller *ctrl, model_list *urls, tls
 
     const char *initial_ep = ctrl_next_ep(ctrl, NULL);
     ctrl->url = strdup(initial_ep);
-    CTRL_LOG(INFO, "using %s", ctrl->url);
+
+    ctrl->client = calloc(1, sizeof(tlsuv_http_t));
     if (tlsuv_http_init(loop, ctrl->client, ctrl->url) != 0) {
+        if (tlsuv_http_close(ctrl->client, (tlsuv_http_close_cb) free) != 0) {
+            free(ctrl->client);
+        }
+        ctrl->client = NULL;
         return ZITI_INVALID_CONFIG;
     }
+    CTRL_LOG(INFO, "controller initialized");
 
     tlsuv_http_set_path_prefix(ctrl->client, "");
     ctrl->client->data = ctrl;
@@ -683,6 +691,9 @@ static void on_http_close(tlsuv_http_t *clt) {
 }
 
 int ziti_ctrl_cancel(ziti_controller *ctrl) {
+    if (ctrl->client == NULL) {
+        return ZITI_OK;
+    }
     return tlsuv_http_cancel_all(ctrl->client);
 }
 
@@ -1057,7 +1068,8 @@ void ziti_pr_post(ziti_controller *ctrl, char *body, size_t body_len,
 
     tlsuv_http_req_t *req = start_request(ctrl->client, "POST", "/posture-response", ctrl_resp_cb, resp);
     tlsuv_http_req_header(req, "Content-Type", "application/json");
-    tlsuv_http_req_data(req, body, body_len, free_body_cb);
+    char *copy = strdup(body);
+    tlsuv_http_req_data(req, copy, body_len, free_body_cb);
 }
 
 void ziti_pr_post_bulk(ziti_controller *ctrl, char *body, size_t body_len,
@@ -1068,7 +1080,8 @@ void ziti_pr_post_bulk(ziti_controller *ctrl, char *body, size_t body_len,
 
     tlsuv_http_req_t *req = start_request(ctrl->client, "POST", "/posture-response-bulk", ctrl_resp_cb, resp);
     tlsuv_http_req_header(req, "Content-Type", "application/json");
-    tlsuv_http_req_data(req, body, body_len, free_body_cb);
+    char *copy = strdup(body);
+    tlsuv_http_req_data(req, copy, body_len, free_body_cb);
 }
 
 static void ctrl_paging_req(struct ctrl_resp *resp) {

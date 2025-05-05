@@ -21,13 +21,15 @@
 class LoopTestCase {
     uv_loop_t *m_loop;
 
-  protected:
+protected:
     LoopTestCase():
                      m_loop(uv_loop_new())
     {}
 
     ~LoopTestCase() {
-        uv_loop_close(loop());
+        int rc = uv_loop_close(loop());
+        INFO("uv_loop_close() => " << uv_strerror(rc));
+        CHECK(rc == 0);
         free(m_loop);
     }
 
